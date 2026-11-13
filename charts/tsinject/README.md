@@ -33,7 +33,7 @@ Notable values (see `values.yaml` for the full set):
 
 | Value | Default | Meaning |
 | --- | --- | --- |
-| `operator.image.tag` | `v11` | Promoted operator image (`promote` workflow mints these). |
+| `operator.image.tag` | `v12` | Promoted operator image (`promote` workflow mints these). |
 | `operator.replicas` | `1` | >1 enables leader election automatically. |
 | `tailscale.tailnet` | `-` | Tailnet to attach workloads to (single-client setup; ignored with `tailnets`). |
 | `tailscale.oauth.existingSecret` | `tailscale-oauth` | Secret with `secret.json`; empty switches to inline `clientId`/`clientSecret` or `tailnets`. |

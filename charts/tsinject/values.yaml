@@ -7,7 +7,7 @@
 operator:
   image:
     repository: ghcr.io/davefinster/tsinject
-    tag: v11
+    tag: v12
     pullPolicy: IfNotPresent
   # With >1 replica the manager leader-elects automatically (reconcilers and
   # cert rotation run on the leader; admission serves on every replica).

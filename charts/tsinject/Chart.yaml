@@ -10,8 +10,8 @@ type: application
 # Bumping `version` and merging to main IS the chart release action: the
 # build workflow publishes not-yet-published versions to
 # oci://ghcr.io/davefinster/charts/tsinject.
-version: 0.4.0
-appVersion: "v11"
+version: 0.5.0
+appVersion: "v12"
 home: https://github.com/davefinster/tsinject
 sources:
   - https://github.com/davefinster/tsinject

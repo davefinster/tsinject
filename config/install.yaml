@@ -122,7 +122,7 @@ spec:
         - name: operator
           # Versioned tags are minted by the promote workflow; bump here
           # (and in charts/tsinject/values.yaml) alongside promotions.
-          image: ghcr.io/davefinster/tsinject:v11
+          image: ghcr.io/davefinster/tsinject:v12
           imagePullPolicy: IfNotPresent
           env:
             # "-" means the tailnet the OAuth client belongs to. Only used
