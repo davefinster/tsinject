@@ -1,0 +1,52 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tsinject.fullname" . }}
+  labels:
+    {{- include "tsinject.labels" . | nindent 4 }}
+rules:
+  # The CRD this operator reconciles (and creates on demand for gated pods).
+  - apiGroups: ["tsinject.dmf.zone"]
+    resources: ["tailscalecredentials"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["tsinject.dmf.zone"]
+    resources: ["tailscalecredentials/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["tsinject.dmf.zone"]
+    resources: ["tailscalecredentials/finalizers"]
+    verbs: ["update"]
+  # Scheduling-gate release: the webhook parks opt-in pods while their
+  # credential is provisioning; the gate controller lifts the gate on Ready.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Delivers the minted OAuth credentials; also the rotated webhook cert.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # serve.json / config.json ConfigMaps from pod annotations.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+  # State-secret access for workload ServiceAccounts (containerboot's
+  # TS_KUBE_SECRET). The operator can only grant secret permissions because
+  # it holds them itself (no escalate verb needed).
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "create", "update", "patch"]
+  # Workload identity resolution: pod → ReplicaSet → Deployment.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get"]
+  # Cert rotator (Gatekeeper pattern): keeps caBundle in the webhook
+  # configuration in sync with the self-managed CA.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Leader election (exercised with operator.replicas > 1).
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]

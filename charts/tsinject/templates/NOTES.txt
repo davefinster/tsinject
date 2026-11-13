@@ -1,0 +1,37 @@
+tsinject {{ .Chart.AppVersion }} installed in {{ .Release.Namespace }}.
+{{- if .Values.tailscale.oauth.existingSecret }}
+
+1. Make sure the operator's OAuth client Secret exists (the pod stays in
+   ContainerCreating until it does):
+
+     kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.tailscale.oauth.existingSecret }} \
+       --from-file=secret.json=/path/to/secret.json
+
+   secret.json: {"client_id": "...", "client_secret": "tskey-client-..."}
+{{- else }}
+
+1. The operator's OAuth client was created from chart values as Secret
+   "{{ include "tsinject.oauthSecretName" . }}".
+{{- end }}
+{{- if .Values.webhook.enabled }}
+
+2. Opt workloads in with one pod label; tune with tailscale-* annotations:
+
+     metadata:
+       labels:
+         inject-tailscale: "true"
+       annotations:
+         tailscale-tags: "web"
+         tailscale-ephemeral: "true"
+
+   The first pod of a workload sits SchedulingGated while its OAuth client
+   is minted (watch: kubectl get tailscalecredentials -A); later pods
+   schedule straight through. Deleting a TailscaleCredential — or the
+   Deployment that owns it — revokes the OAuth client in the tailnet.
+{{- else }}
+
+2. The admission webhook is disabled (webhook.enabled=false): the operator
+   only reconciles hand-authored TailscaleCredential objects.
+{{- end }}
+
+Injected tailscale image: {{ .Values.tailscale.injectedImage }}

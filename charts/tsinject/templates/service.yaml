@@ -1,0 +1,18 @@
+{{- if .Values.webhook.enabled }}
+# Fixed name: the operator's cert rotator builds the serving certificate for
+# "tsinject-webhook.<namespace>.svc" (see _helpers.tpl note).
+apiVersion: v1
+kind: Service
+metadata:
+  name: tsinject-webhook
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tsinject.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "tsinject.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: 9443
+{{- end }}

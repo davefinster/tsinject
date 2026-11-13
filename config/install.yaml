@@ -1,0 +1,225 @@
+# tsinject-operator install: namespace, RBAC, deployment, webhook.
+#
+#   kubectl apply -f config/tsinject.dmf.zone_tailscalecredentials.yaml   # CRD first
+#   kubectl apply -f config/install.yaml
+#   kubectl -n tsinject-system create secret generic tailscale-oauth \
+#     --from-file=secret.json=/path/to/secret.json
+#
+# secret.json is the operator's own Tailscale OAuth client (created in the
+# admin console with enough scope to mint OAuth clients):
+#   {"client_id": "...", "client_secret": "tskey-client-..."}
+# or, for multiple tailnets (Tailnets API), a map of named tailnets — each
+# administered by its own scoped OAuth client — with one nominated default:
+#   {"default": "homelab", "tailnets": {
+#     "homelab": {"tailnet": "-", "client_id": "...", "client_secret": "..."},
+#     "global-infrastructure": {"tailnet": "<tailnet-id>", "client_id": "...", "client_secret": "..."}}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tsinject-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tsinject-operator
+  namespace: tsinject-system
+---
+# Placeholder the operator's cert rotator populates and rotates —
+# cert-controller updates this Secret but never creates it. The label is
+# what the operator's scoped Secret informer selects on (the operator also
+# self-heals it at startup when missing).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tsinject-webhook-cert
+  namespace: tsinject-system
+  labels:
+    tsinject.dmf.zone/watched: "true"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tsinject-operator
+rules:
+  # The CRD this operator reconciles.
+  - apiGroups: ["tsinject.dmf.zone"]
+    resources: ["tailscalecredentials"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["tsinject.dmf.zone"]
+    resources: ["tailscalecredentials/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["tsinject.dmf.zone"]
+    resources: ["tailscalecredentials/finalizers"]
+    verbs: ["update"]
+  # Scheduling-gate release: the webhook parks opt-in pods while their
+  # credential is provisioning; the gate controller lifts the gate on Ready.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Delivers the minted OAuth credentials; also the rotated webhook cert.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # serve.json / config.json ConfigMaps from pod annotations.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+  # State-secret access for workload ServiceAccounts (containerboot's
+  # TS_KUBE_SECRET). The operator can only grant secret permissions because
+  # it holds them itself (no escalate verb needed).
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "create", "update", "patch"]
+  # Workload identity resolution: pod → ReplicaSet → Deployment.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get"]
+  # Cert rotator (Gatekeeper pattern): keeps caBundle in the webhook
+  # configuration in sync with the self-managed CA.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Leader election (only exercised with --leader-elect).
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tsinject-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tsinject-operator
+subjects:
+  - kind: ServiceAccount
+    name: tsinject-operator
+    namespace: tsinject-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tsinject-operator
+  namespace: tsinject-system
+  labels:
+    app.kubernetes.io/name: tsinject-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tsinject-operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tsinject-operator
+    spec:
+      serviceAccountName: tsinject-operator
+      containers:
+        - name: operator
+          # Versioned tags are minted by the promote workflow; bump here
+          # (and in charts/tsinject/values.yaml) alongside promotions.
+          image: ghcr.io/davefinster/tsinject:v11
+          imagePullPolicy: IfNotPresent
+          env:
+            # "-" means the tailnet the OAuth client belongs to. Only used
+            # with the single-client secret.json shape; the multi-tailnet
+            # shape names a tailnet per entry.
+            - name: TAILNET
+              value: "-"
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Kata pods only: the extended resource a device plugin on the
+            # Kata nodes advertises for /dev/net/tun. Unset requests nothing.
+            # - name: KATA_TUN_RESOURCE
+            #   value: squat.ai/tun
+          # args: ["--leader-elect"]   # only needed with replicas > 1
+          ports:
+            - name: webhook
+              containerPort: 9443
+          volumeMounts:
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+            - name: tailscale-oauth
+              mountPath: /tailscale
+              readOnly: true
+          # /readyz includes the webhook-certs check: the pod only goes Ready
+          # (and receives admission traffic) once the rotator has certs.
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8081 }
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            initialDelaySeconds: 15
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+      volumes:
+        # Must be the cert SECRET, not an emptyDir: the rotator writes the
+        # Secret and waits for kubelet to project it here before reporting
+        # ready — it never writes files into the directory itself.
+        - name: certs
+          secret:
+            secretName: tsinject-webhook-cert
+            optional: true
+        # The operator's own Tailscale OAuth client (see header).
+        - name: tailscale-oauth
+          secret:
+            secretName: tailscale-oauth
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tsinject-webhook
+  namespace: tsinject-system
+spec:
+  selector:
+    app.kubernetes.io/name: tsinject-operator
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: 9443
+---
+# Pod admission: strictly opt-in via objectSelector (the
+# inject-tailscale=true label), so unlabeled pods never traverse the webhook and failurePolicy: Fail cannot brick
+# unrelated workloads (or the operator itself). caBundle is EMPTY here on
+# purpose — the operator's cert rotator patches it in at startup; until
+# then, labeled pod creation fails closed.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: tsinject-mutating
+webhooks:
+  - name: pods.tsinject.dmf.zone
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 10
+    reinvocationPolicy: IfNeeded
+    objectSelector:
+      matchLabels:
+        inject-tailscale: "true"
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+    clientConfig:
+      service:
+        name: tsinject-webhook
+        namespace: tsinject-system
+        path: /mutate-pods
+        port: 443

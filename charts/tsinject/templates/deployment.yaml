@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tsinject.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tsinject.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.operator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "tsinject.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tsinject.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "tsinject.fullname" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: operator
+          image: "{{ .Values.operator.image.repository }}:{{ .Values.operator.image.tag }}"
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          args:
+            - --enable-webhook={{ .Values.webhook.enabled }}
+            - --metrics-bind-address={{ .Values.metricsBindAddress }}
+            {{- if gt (int .Values.operator.replicas) 1 }}
+            - --leader-elect
+            {{- end }}
+          env:
+            - name: TAILNET
+              value: {{ .Values.tailscale.tailnet | quote }}
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: TAILSCALE_IMAGE
+              value: {{ .Values.tailscale.injectedImage | quote }}
+            {{- with .Values.tailscale.kataTunResource }}
+            - name: KATA_TUN_RESOURCE
+              value: {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: webhook
+              containerPort: 9443
+          volumeMounts:
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+            - name: tailscale-oauth
+              mountPath: /tailscale
+              readOnly: true
+          # /readyz includes the webhook-certs check: the pod only goes Ready
+          # (and receives admission traffic) once the rotator has certs.
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8081 }
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8081 }
+            initialDelaySeconds: 15
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        # Must be the cert SECRET, not an emptyDir: the rotator writes the
+        # Secret and then waits for kubelet to project it here before
+        # reporting ready — it never writes files into the directory itself.
+        # optional: pods can start before the placeholder exists (the
+        # operator self-creates it); kubelet syncs data in as it appears.
+        - name: certs
+          secret:
+            secretName: tsinject-webhook-cert
+            optional: true
+        # The operator's own Tailscale OAuth client (key secret.json).
+        - name: tailscale-oauth
+          secret:
+            secretName: {{ include "tsinject.oauthSecretName" . }}

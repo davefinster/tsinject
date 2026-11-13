@@ -1,0 +1,91 @@
+# Values for the tsinject chart.
+#
+# Install (namespace is your choice; everything derives from it):
+#   helm upgrade --install tsinject oci://ghcr.io/davefinster/charts/tsinject \
+#     --namespace tsinject-system --create-namespace
+
+operator:
+  image:
+    repository: ghcr.io/davefinster/tsinject
+    tag: v11
+    pullPolicy: IfNotPresent
+  # With >1 replica the manager leader-elects automatically (reconcilers and
+  # cert rotation run on the leader; admission serves on every replica).
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+tailscale:
+  # Tailnet workloads attach to; "-" means the OAuth client's own tailnet.
+  # Applies to the single-credential oauth setup below; ignored when
+  # `tailnets` is set (each entry names its own).
+  tailnet: "-"
+  # The operator's own Tailscale OAuth client (needs scope to mint OAuth
+  # clients / auth keys). Either point at an existing Secret in the release
+  # namespace carrying key `secret.json` with
+  #   {"client_id": "...", "client_secret": "tskey-client-..."}
+  # or set clientId/clientSecret to have the chart create that Secret.
+  # existingSecret wins when both are
+  # set — and also over `tailnets` below, so a hand-crafted multi-tailnet
+  # secret.json can simply be mounted as-is.
+  oauth:
+    existingSecret: tailscale-oauth
+    clientId: ""
+    clientSecret: ""
+  # Multiple tailnets (Tailnets API): each entry is an operator-configured
+  # tailnet workloads select with the tailscale-tailnet annotation /
+  # spec.tailnet. Every API-only tailnet is administered only by its own
+  # scoped OAuth client, hence one clientId/clientSecret per entry; tailnet
+  # is the API path segment (a tailnet ID, or "-" for the client's own —
+  # the default when omitted). Non-empty tailnets replaces the single-client
+  # secret.json above (unless oauth.existingSecret is set, which wins).
+  # defaultTailnet nominates the entry unnamed workloads land on; required
+  # with more than one entry. credentialMode: federated makes an entry's
+  # workloads join as their own federated identities (tailscale-client-id /
+  # tailscale-audience annotations) instead of minted OAuth clients; its
+  # clientId/clientSecret then become optional.
+  defaultTailnet: ""
+  tailnets: {}
+  #  homelab:
+  #    tailnet: "-"
+  #    clientId: "..."
+  #    clientSecret: "tskey-client-..."
+  #  global-infrastructure:
+  #    tailnet: "<tailnet-id>"
+  #    clientId: "..."
+  #    clientSecret: "tskey-client-..."
+  # Image the webhook injects into opt-in pods; individual pods override it
+  # with the tailscale-custom-image annotation.
+  injectedImage: ghcr.io/tailscale/tailscale:latest
+  # Extended resource the sidecar requests in pods under a Kata runtime class
+  # (runtimeClassName kata*), so that a device plugin hands /dev/net/tun into
+  # the guest VM for tailscaled's kernel networking, e.g. squat.ai/tun from
+  # squat's generic-device-plugin. Empty (the default) requests nothing. Set
+  # it only when a plugin on the Kata nodes advertises the resource, or those
+  # pods stay Pending.
+  kataTunResource: ""
+
+webhook:
+  # Serve the pod admission webhook and create its configuration. Purely
+  # opt-in for workloads either way (objectSelector on inject-tailscale).
+  enabled: true
+  # Ship the empty placeholder Secret the operator's cert rotator populates.
+  # Set false when tsinject-webhook-cert already exists outside this release
+  # (created manually or by a previous install): Helm refuses to adopt
+  # objects it didn't create, and the operator self-creates the Secret when
+  # absent anyway.
+  createCertSecret: true
+
+# For private GHCR packages; the secret must exist in the release namespace.
+imagePullSecrets: []
+# - name: ghcr-pull
+
+# ":8443" to expose controller-runtime metrics; "0" disables.
+metricsBindAddress: "0"
+
+nameOverride: ""
+fullnameOverride: ""

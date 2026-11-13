@@ -1,0 +1,140 @@
+# CI: test the operator, build its container image, and publish the Helm
+# chart as an OCI artifact.
+#
+# Pull requests: build + chart lint/render/validate only (no registry
+# access needed).
+# Pushes to main: additionally push to GHCR —
+#   ghcr.io/<owner>/tsinject:main         (moving tag)
+#   ghcr.io/<owner>/tsinject:sha-<short>  (immutable)
+#   oci://ghcr.io/<owner>/charts/tsinject (immutable, only when
+#     charts/tsinject/Chart.yaml carries a not-yet-published version)
+#
+# Versioned image tags (v1, v2, ...) — what the chart and install.yaml
+# reference — are minted by the manual promote workflow, which re-tags
+# already-built images rather than rebuilding. Chart versions are
+# source-controlled: bumping Chart.yaml's `version` and merging IS the
+# release action.
+#
+# Auth is the workflow's own GITHUB_TOKEN (packages: write); the first push
+# auto-links the packages to this repo, but they still start PRIVATE —
+# flip visibility in the package settings once.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: go.sum
+      - name: Operator checks
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/tsinject
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha
+      - name: Build (and push on main)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' }}
+          # Plain image manifests (no provenance attestation index): keeps
+          # `imagetools inspect/create` in the promote workflow simple and
+          # deterministic.
+          provenance: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  chart:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Chart CRD copy in sync with the operator's
+        run: |
+          diff -u config/tsinject.dmf.zone_tailscalecredentials.yaml \
+                  charts/tsinject/crds/tsinject.dmf.zone_tailscalecredentials.yaml
+      - name: Lint + render
+        run: |
+          helm lint charts/tsinject
+          helm template tsinject charts/tsinject \
+            --namespace tsinject-system > /dev/null
+          helm template tsinject charts/tsinject --namespace tsinject-system \
+            --set tailscale.oauth.existingSecret= \
+            --set tailscale.oauth.clientId=id \
+            --set tailscale.oauth.clientSecret=secret > /dev/null
+          helm template tsinject charts/tsinject --namespace tsinject-system \
+            --set webhook.enabled=false --set operator.replicas=2 > /dev/null
+      # Schema-valid YAML can still be semantically invalid (e.g. a volume
+      # with two types) — only an API server catches that, so publishes are
+      # gated on a real server-side dry-run against a throwaway kind cluster.
+      - name: Boot kind for server-side validation
+        uses: helm/kind-action@v1
+      - name: Server-side dry-run of the rendered chart
+        run: |
+          kubectl create namespace tsinject-system
+          helm template tsinject charts/tsinject --namespace tsinject-system \
+            --include-crds | kubectl apply --dry-run=server -f -
+      - name: Publish to GHCR (new versions only)
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          version=$(yq '.version' charts/tsinject/Chart.yaml)
+          # Chart versions are immutable: skip if this one is already up.
+          token=$(curl -fsSL -u "${{ github.actor }}:$GH_TOKEN" \
+            "https://ghcr.io/token?scope=repository:$OWNER/charts/tsinject:pull" | jq -r .token)
+          published=$(curl -fsSL -H "Authorization: Bearer $token" \
+            "https://ghcr.io/v2/$OWNER/charts/tsinject/tags/list" | jq -r '.tags[]?' || true)
+          if printf '%s\n' "$published" | grep -qx "$version"; then
+            echo "::notice::chart $version already published — bump charts/tsinject/Chart.yaml to release a new version"
+            exit 0
+          fi
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm package charts/tsinject
+          helm push "tsinject-$version.tgz" "oci://ghcr.io/$OWNER/charts"
+          {
+            echo "### Published chart"
+            echo '```'
+            echo "helm upgrade --install tsinject oci://ghcr.io/$OWNER/charts/tsinject --version $version"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

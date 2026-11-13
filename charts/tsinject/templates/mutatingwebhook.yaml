@@ -1,0 +1,38 @@
+{{- if .Values.webhook.enabled }}
+# Fixed name: the operator's cert rotator patches caBundle into this
+# configuration by constant name (see _helpers.tpl note). caBundle is empty
+# here on purpose — the rotator fills it at startup and re-heals it after
+# every `helm upgrade` resets it (a few seconds of fail-closed admission for
+# labeled pods only, thanks to the opt-in objectSelector).
+#
+# The inject-tailscale=true selector is deliberately not templated: the
+# operator scopes its pod informer cache to the same label, so a diverging
+# selector would leave gated pods invisible to the gate controller.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: tsinject-mutating
+  labels:
+    {{- include "tsinject.labels" . | nindent 4 }}
+webhooks:
+  - name: pods.tsinject.dmf.zone
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 10
+    reinvocationPolicy: IfNeeded
+    objectSelector:
+      matchLabels:
+        inject-tailscale: "true"
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+    clientConfig:
+      service:
+        name: tsinject-webhook
+        namespace: {{ .Release.Namespace }}
+        path: /mutate-pods
+        port: 443
+{{- end }}

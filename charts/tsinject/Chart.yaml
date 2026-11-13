@@ -1,0 +1,19 @@
+apiVersion: v2
+name: tsinject
+description: >-
+  Tailscale sidecar injection operator: annotation-driven pod mutation, the
+  TailscaleCredential CRD provisioning per-workload OAuth clients delivered
+  as Secrets, scheduling-gate deferral while credentials provision, and
+  self-managed webhook TLS. The injected tailscale image is configured here,
+  not deployed by the chart.
+type: application
+# Bumping `version` and merging to main IS the chart release action: the
+# build workflow publishes not-yet-published versions to
+# oci://ghcr.io/davefinster/charts/tsinject.
+version: 0.4.0
+appVersion: "v11"
+home: https://github.com/davefinster/tsinject
+sources:
+  - https://github.com/davefinster/tsinject
+maintainers:
+  - name: davefinster

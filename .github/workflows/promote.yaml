@@ -1,0 +1,102 @@
+# Manual promotion: tag the latest built operator image as the next version.
+#
+# Looks up the highest existing vN tag on ghcr.io/<owner>/tsinject,
+# increments it, and re-tags the chosen source image (default: the :main
+# image the build workflow pushed) as vN+1 **by digest** — the exact bits
+# that were built and tested get promoted, no rebuild. Also pushes a
+# matching `vN+1` git tag at the commit the image was built from (recovered
+# from its OCI revision label).
+#
+# After promoting, update the tag where it is referenced —
+# charts/tsinject/values.yaml (operator.image.tag) and config/install.yaml
+# — bump the chart version, and merge: the build workflow publishes the new
+# chart release.
+name: promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-tag:
+        description: "Existing image tag to promote"
+        required: false
+        default: main
+      version:
+        description: "Explicit version (e.g. v7); leave empty to auto-increment the highest existing vN"
+        required: false
+        default: ""
+
+permissions:
+  contents: write # push the vN git tag
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/tsinject
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine next version
+        id: ver
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          EXPLICIT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$EXPLICIT" ]; then
+            next="$EXPLICIT"
+          else
+            # Registry API, authed by exchanging GITHUB_TOKEN for a pull token.
+            token=$(curl -fsSL -u "${{ github.actor }}:$GH_TOKEN" \
+              "https://ghcr.io/token?scope=repository:$OWNER/tsinject:pull" | jq -r .token)
+            latest=$(curl -fsSL -H "Authorization: Bearer $token" \
+              "https://ghcr.io/v2/$OWNER/tsinject/tags/list" \
+              | jq -r '.tags[]?' | grep -E '^v[0-9]+$' | sed 's/^v//' | sort -n | tail -n1 || true)
+            next="v$(( ${latest:-0} + 1 ))"
+          fi
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "promoting $IMAGE:${{ inputs.source-tag }} -> $IMAGE:$next"
+
+      - name: Retag on the registry (no rebuild)
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE:${{ steps.ver.outputs.next }}" \
+            "$IMAGE:${{ inputs.source-tag }}"
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Anchor a git tag at the promoted image's source commit
+        run: |
+          set -euo pipefail
+          rev=$(docker buildx imagetools inspect "$IMAGE:${{ inputs.source-tag }}" \
+            --format '{{ index .Image.Config.Labels "org.opencontainers.image.revision" }}' 2>/dev/null || true)
+          if [ -n "$rev" ] && git cat-file -e "$rev^{commit}" 2>/dev/null; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "${{ steps.ver.outputs.next }}" "$rev"
+            git push origin "${{ steps.ver.outputs.next }}"
+          else
+            echo "::notice::image carries no resolvable revision label; skipping the git tag"
+          fi
+
+      - name: Summary
+        run: |
+          {
+            echo "### Promoted operator"
+            echo '```'
+            echo "$IMAGE:${{ steps.ver.outputs.next }}"
+            echo '```'
+            echo "Update \`operator.image.tag\` in charts/tsinject/values.yaml (and"
+            echo "config/install.yaml for kubectl installs), bump the chart version,"
+            echo "and merge — the build workflow publishes the chart release."
+          } >> "$GITHUB_STEP_SUMMARY"

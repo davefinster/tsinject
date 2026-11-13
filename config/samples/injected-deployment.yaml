@@ -1,0 +1,37 @@
+# With the operator installed, this is the ENTIRE workload an author writes
+# to join the tailnet: one label, plus tailscale-* annotations for the
+# options. The webhook injects the sidecar machinery; the first pod is
+# admitted SchedulingGated while the operator mints the OAuth client and
+# delivers the web-ts-credential Secret, then the gate lifts and the pod
+# schedules. Later pods (scale-ups, restarts) skip the gate entirely.
+#
+#   kubectl -n <ns> get tailscalecredential web    # READY=True when done
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+        inject-tailscale: "true"
+      annotations:
+        tailscale-tags: "web"          # -> tag:injected,tag:web
+        tailscale-ephemeral: "true"    # nodes vanish when pods do
+        # tailscale-tailnet: global-infrastructure   # named tailnet; default when omitted
+        # tailscale-custom-image: ghcr.io/tailscale/tailscale:v1.86.0
+        # tailscale-privileged: "true"
+        # tailscale-shared-name: my-shared-identity
+        # tailscale-env: |
+        #   TS_EXTRA_ARGS=--hostname=web
+        # tailscale-serve-config: '{"TCP":{"443":{"HTTPS":true}},...}'
+        # tailscale-advertise-services: "svc:web"
+    spec:
+      containers:
+        - name: app
+          image: nginx:alpine
